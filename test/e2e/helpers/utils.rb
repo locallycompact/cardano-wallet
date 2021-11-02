@@ -132,7 +132,7 @@ module Helpers
         os = "win"
       end
 
-      "https://hydra.iohk.io/job/Cardano/cardano-wallet/cardano-wallet-#{os}64/latest/download-by-type/file/binary-dist"
+      "https://hydra.iohk.io/job/Cardano/cardano-wallet-pr-2750/cardano-wallet-#{os}64/latest/download-by-type/file/binary-dist"
     end
 
     def get_latest_configs_base_url
