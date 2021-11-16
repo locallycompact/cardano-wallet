@@ -928,8 +928,10 @@ genStakePoolMetadata =
 
         genHomepage :: Gen T.Text
         genHomepage = do
-            n <- arbitrary
-            T.pack <$> vector n
+            -- There is a limit of 64 bytes on the size of the URL
+            -- n <- chooseInt (0, 1)
+            -- T.pack <$> vector n
+            pure ""
 
 instance ToJSON StakePoolMetadata where
     toJSON (StakePoolMetadata name description ticker homepage) =
