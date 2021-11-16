@@ -26,7 +26,7 @@ module Cardano.Wallet.Shelley.TransactionSpec
 import Prelude
 
 import Cardano.Address.Derivation
-    ( XPrv, xprvFromBytes, xprvToBytes )
+    ( XPrv, toXPub, xprvFromBytes, xprvToBytes, xpubPublicKey )
 import Cardano.Address.Script
     ( KeyHash (..)
     , KeyRole (Delegation, Payment)
@@ -44,23 +44,30 @@ import Cardano.Api
     , ShelleyBasedEra (..)
     , cardanoEraStyle
     )
+import Cardano.Mnemonic
+    ( MkSomeMnemonic (..), MkSomeMnemonicError (..), SomeMnemonic (..) )
 import Cardano.Wallet
     ( ErrSelectAssets (..)
     , ErrUpdateSealedTx (..)
     , FeeEstimation (..)
     , estimateFee
+    , signTransaction
     )
 import Cardano.Wallet.Byron.Compatibility
     ( maryTokenBundleMaxSize )
 import Cardano.Wallet.Gen
     ( genScript )
+import Cardano.Wallet.Gen
+    ( genMnemonic )
 import Cardano.Wallet.Primitive.AddressDerivation
-    ( DerivationIndex (..)
+    ( Depth (..)
+    , DerivationIndex (..)
     , Passphrase (..)
     , PassphraseMaxLength (..)
     , PassphraseMinLength (..)
     , PassphraseScheme (..)
     , hex
+    , liftRawKey
     , preparePassphrase
     )
 import Cardano.Wallet.Primitive.AddressDerivation.Byron
@@ -153,10 +160,14 @@ import Cardano.Wallet.Transaction
     )
 import Cardano.Wallet.Unsafe
     ( unsafeFromHex )
+import Control.Arrow
+    ( first )
 import Control.Monad
     ( forM_, replicateM )
 import Control.Monad.Trans.Except
     ( except, runExceptT )
+import Crypto.Hash.Utils
+    ( blake2b224 )
 import Data.ByteString
     ( ByteString )
 import Data.Either
@@ -210,6 +221,7 @@ import Test.Hspec.QuickCheck
 import Test.QuickCheck
     ( Arbitrary (..)
     , Blind (..)
+    , InfiniteList (..)
     , NonEmptyList (..)
     , Property
     , arbitraryPrintableChar
@@ -245,7 +257,11 @@ import Test.Utils.Pretty
 
 import qualified Cardano.Api as Cardano
 import qualified Cardano.Api.Shelley as Cardano
+import qualified Cardano.Crypto.Hash.Class as Crypto
 import qualified Cardano.Ledger.Alonzo.TxWitness as Alonzo
+import qualified Cardano.Wallet.Primitive.AddressDerivation.Byron as Byron
+import qualified Cardano.Wallet.Primitive.AddressDerivation.Icarus as Icarus
+import qualified Cardano.Wallet.Primitive.AddressDerivation.Shelley as Shelley
 import qualified Cardano.Wallet.Primitive.CoinSelection.Balance as Balance
 import qualified Cardano.Wallet.Primitive.Types.TokenBundle as TokenBundle
 import qualified Cardano.Wallet.Primitive.Types.TokenMap as TokenMap
@@ -258,6 +274,7 @@ import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as T
+import qualified Shelley.Spec.Ledger.API as SL
 
 spec :: Spec
 spec = do
@@ -268,6 +285,62 @@ spec = do
     forAllEras binaryCalculationsSpec
     transactionConstraintsSpec
     updateSealedTxSpec
+    describe "Sign transaction" $ do
+        it "signTransaction adds reward account witness when necessary"
+            property prop_signTransaction_addsRewardAccountKey
+
+prop_signTransaction_addsRewardAccountKey
+    :: Cardano.NetworkId
+    -> UTxO
+    -> (XPrv, Passphrase "encryption")
+    -> AnyCardanoEra
+    -> SealedTx
+    -> Property
+prop_signTransaction_addsRewardAccountKey networkId utxo k era tx = property $
+    let
+        tl = newTransactionLayer networkId
+        rootK = first liftRawKey k
+        kk = fromJust . Crypto.hashFromBytes . blake2b224 . xpubPublicKey . toXPub . fst $ k
+    in
+        case era of
+            AnyCardanoEra cardanoEra ->
+                let
+                    wdrls =
+                        case Cardano.withdrawalsSupportedInEra cardanoEra of
+                            Nothing -> Cardano.TxWithdrawalsNone
+                            Just supported ->
+                                Cardano.TxWithdrawals
+                                    supported
+                                    [ ( Cardano.StakeAddress
+                                            undefined
+                                            (SL.ScriptHashObj (SL.ScriptHash kk))
+                                      , undefined
+                                      , undefined
+                                      )
+                                    ]
+
+                    tx' = signTransaction tl era (const Nothing) rootK utxo tx
+                in
+                    length (Cardano.getTxWitnesses $ cardanoTx tx')
+                    > length (Cardano.getTxWitnesses $ cardanoTx tx)
+
+instance Arbitrary (ShelleyKey 'RootK XPrv) where
+    shrink _ = []
+    arbitrary = genRootKeysSeqWithPass =<< genPassphrase (0, 16)
+
+genRootKeysSeqWithPass
+    :: Passphrase "encryption"
+    -> Gen (ShelleyKey depth XPrv)
+genRootKeysSeqWithPass encryptionPass = do
+    s <- SomeMnemonic <$> genMnemonic @15
+    g <- Just . SomeMnemonic <$> genMnemonic @12
+    return $ Shelley.unsafeGenerateKeyFromSeed (s, g) encryptionPass
+
+genPassphrase :: (Int, Int) -> Gen (Passphrase purpose)
+genPassphrase range = do
+    n <- choose range
+    InfiniteList bytes _ <- arbitrary
+    return $ Passphrase $ BA.convert $ BS.pack $ take n bytes
 
 forAllEras :: (AnyCardanoEra -> Spec) -> Spec
 forAllEras eraSpec = do
